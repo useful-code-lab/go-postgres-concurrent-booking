@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:16-alpine
+        env:
+        - name: POSTGRES_DB
+          value: booking_db
+        - name: POSTGRES_USER
+          value: user
+        - name: POSTGRES_PASSWORD
+          value: password
+        ports:
+        - containerPort: 5432
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-service
+spec:
+  selector:
+    app: postgres
+  ports:
+  - protocol: TCP
+    port: 5432
+    targetPort: 5432
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chronos-lock
+spec:
+  replicas: 3 # Запускаем три параллельных инстанса
+  selector:
+    matchLabels:
+      app: chronos-lock
+  template:
+    metadata:
+      labels:
+        app: chronos-lock
+    spec:
+      containers:
+      - name: chronos-lock
+        image: chronos-lock:local # Образ вашего приложения
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080
+        env:
+        - name: DATABASE_URL
+          value: "postgres://user:password@postgres-service:5432/booking_db?sslmode=disable"
+        # Настройка Graceful Shutdown: Kubernetes даст приложению время завершить транзакции дат
+        lifecycle:
+          preStop:
+            exec:
+              command: ["/bin/sh", "-c", "sleep 2"]
