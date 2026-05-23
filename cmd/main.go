@@ -71,7 +71,7 @@ func (e *ChronosLockEngine) BookSlot(ctx context.Context, resourceID string, sta
 
 	// Финальная проверка на пересечение дат внутри заблокированной транзакции
 	var hasOverlap bool
-	checkQuery := `SELECT EXISTS(SELECT 1 FROM reservations WHERE resource_id = $1 AND booking_period && $2)`
+	checkQuery := `SELECT EXISTS(SELECT id FROM reservations WHERE resource_id = $1 AND booking_period && $2)`
 	if err := tx.QueryRow(ctx, checkQuery, resourceID, bookingRange).Scan(&hasOverlap); err != nil {
 		return err
 	}
