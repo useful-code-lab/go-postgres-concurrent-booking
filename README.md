@@ -1,0 +1,117 @@
+# ChronosLock ⏳🔒
+
+Продвинутый высококонкурентный сервис на Golang для бронирования ресурсов и работы с временными диапазонами без дублирования данных.
+
+Проект разработан для работы в высоконагруженных (Highload) средах под управлением **Kubernetes** и использует **PostgreSQL** в качестве единого источника истины для синхронизации распределенных транзакций.
+
+## ✨ Ключевые особенности и паттерны
+
+В проекте реализовано 5 уровней защиты от конкурентного изменения данных (Race Conditions) и наложения дат:
+1. **PostgreSQL TSRANGE & Exclusion Constraints**: Защита на уровне СУБД с помощью GIST-индексов. База физически отвергает пересекающиеся диапазоны дат (`booking_period WITH &&`).
+2. **Context-Driven Timeouts**: Защита от зависания транзакций. Если база заблокирована, Go-рантайм отпустит клиента по таймауту через 3 секунды.
+3. **In-Memory Striped Lock (`sync.Map`)**: Сегментированная блокировка мьютексами в памяти приложения. Экономит пулы соединений к БД, отсекая повторные запросы к одному ресурсу на уровне инстанса.
+4. **Pessimistic Locking (`SELECT FOR UPDATE`)**: Синхронизирует параллельные поды в Kubernetes, выстраивая запросы к одному ресурсу в строгую очередь.
+5. **Graceful Shutdown**: Безопасная остановка приложения при автоскейлинге в K8s. Приложению дается 5 секунд на завершение активных транзакций перед выключением.
+
+---
+
+## 🛠️ Быстрый старт в Kubernetes
+
+### 1. Подготовка окружения
+Убедитесь, что ваш локальный Kubernetes-кластер (Minikube/Kind) запущен. 
+
+Если вы используете **Minikube**, переключите Docker-контекст, чтобы кластер видел локальные образы:
+```bash
+eval $(minikube docker-env)
+```
+
+### 2. Сборка Docker-образа
+Проект использует `multi-stage build`, что гарантирует размер итогового образа менее 20 МБ.
+```bash
+docker build -t chronos-lock:local .
+```
+*(Для **Kind** выполните: `kind load docker-image chronos-lock:local --name kind`)*
+
+### 3. Развертывание инфраструктуры
+Примените манифесты для запуска базы данных Postgres и 3 реплик приложения `ChronosLock`:
+```bash
+kubectl apply -f k8s-manifests.yaml
+```
+
+Проверить статус подов:
+```bash
+kubectl get pods -l app=chronos-lock
+```
+*Дождитесь статуса `Running` для всех трех реплик.*
+
+---
+
+## 🗄️ Инициализация базы данных
+
+Так как приложение использует продвинутые типы данных, необходимо применить SQL-миграцию.
+
+1. Узнайте имя вашего пода Postgres:
+   ```bash
+   kubectl get pods -l app=postgres
+   ```
+2. Подключитесь к СУБД и создайте структуру:
+   ```bash
+   kubectl exec -it <ИМЯ_ПОДА_POSTGRES> -- psql -U user -d booking_db
+   ```
+3. Выполните следующий SQL-скрипт:
+   ```sql
+   CREATE EXTENSION IF NOT EXISTS btree_gist;
+
+   CREATE TABLE resources (
+       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+       name VARCHAR(255) NOT NULL
+   );
+
+   CREATE TABLE reservations (
+       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+       resource_id UUID NOT NULL REFERENCES resources(id) ON DELETE CASCADE,
+       booking_period TSRANGE NOT NULL,
+       created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+       CONSTRAINT no_overlapping_reservations EXCLUDE USING gist (
+           resource_id WITH =,
+           booking_period WITH &&
+       )
+   );
+
+   -- Сид для теста (этот UUID зашит в http-обработчике)
+   INSERT INTO resources (id, name) VALUES ('d3b07384-d113-49cd-a5d6-831ca6e58d78', 'Meeting Room Alpha');
+   \q
+   ```
+
+---
+
+## 🧪 Проверка на Race Conditions (Стресс-тест)
+
+Проверим, как 3 независимых пода в Kubernetes справятся с одновременной атакой запросов на одну и ту же дату.
+
+1. В первом терминале запустите проброс портов (балансировщик K8s будет распределять трафик между подами):
+   ```bash
+   kubectl port-forward deployment/chronos-lock 8080:8080
+   ```
+
+2. Во втором терминале отправьте **10 одновременных запросов в фоне** на бронирование одного временного слота:
+   ```bash
+   for i in {1..10}; do curl -i http://localhost:8080/book & done; wait
+   ```
+
+### Ожидаемый результат:
+* **Ровно 1 запрос** вернет `HTTP/1.1 201 Created` (`Successfully booked!`).
+* **Остальные 9 запросов** вернут `HTTP/1.1 409 Conflict` с ошибкой конкурентности.
+
+Вы можете убедиться в консистентности данных, проверив таблицу в БД (там окажется ровно одна запись):
+```bash
+kubectl exec -it <ИМЯ_ПОДА_POSTGRES> -- psql -U user -d booking_db -c "SELECT * FROM reservations;"
+```
+
+---
+
+## 📈 Архитектура кода (`main.go`)
+
+* `BookSlot(ctx, resourceID, start, end)` — инкапсулирует в себе всю бизнес-логику конкурентного бронирования.
+* `sync.Map` — гарантирует, что внутри одного пода запросы к одному ресурсу не порождают лишних транзакций.
+* `pgx/v5` — используется для нативной передачи структуры `pgtype.Range[pgtype.Timestamp]` в Postgres TSRANGE.

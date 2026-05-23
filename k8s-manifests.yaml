@@ -54,7 +54,7 @@ spec:
       containers:
       - name: chronos-lock
         image: chronos-lock:local # Образ вашего приложения
-        imagePullPolicy: IfNotPresent
+        imagePullPolicy: Never
         ports:
         - containerPort: 8080
         env:
