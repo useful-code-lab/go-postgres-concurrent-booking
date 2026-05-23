@@ -31,7 +31,27 @@ func NewEngine(pool *pgxpool.Pool) *ChronosLockEngine {
 
 // BookSlot — конкурентное бронирование диапазона дат
 func (e *ChronosLockEngine) BookSlot(ctx context.Context, resourceID string, start, end time.Time) error {
-	// Паттерн 1: Ограничение времени операции (защита от зависания транзакций)
+	// --- УРОВЕНЬ ЗАЩИТЫ 1: Валидация структуры диапазона ---
+	if start.IsZero() || end.IsZero() {
+		return errors.New("invalid dates: start or end time cannot be empty")
+	}
+	if !end.After(start) {
+		return errors.New("invalid range: end time must be strictly after start time")
+	}
+
+	// --- УРОВЕНЬ ЗАЩИТЫ 2: Защита от бронирования «прошлого» и Clock Skew ---
+	// Разрешаем погрешность в 1 минуту на рассинхронизацию часов между подами Kubernetes
+	now := time.Now().Add(-1 * time.Minute)
+	if start.Before(now) {
+		return errors.New("invalid date: cannot book a slot in the past")
+	}
+
+	// Минимальная длительность бронирования (например, нельзя забронировать 0 секунд)
+	if end.Sub(start) < 5*time.Minute {
+		return errors.New("invalid duration: minimum booking slot is 5 minutes")
+	}
+
+	// Паттерн: Ограничение времени операции в БД
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 

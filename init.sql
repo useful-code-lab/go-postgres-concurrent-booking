@@ -29,3 +29,13 @@ WHERE booking_period >> tsrange('2026-01-01 00:00:00', '2026-01-01 00:00:00');
 
 -- Тестовые данные
 INSERT INTO resources (id, name) VALUES ('d3b07384-d113-49cd-a5d6-831ca6e58d78', 'Meeting Room Alpha');
+
+
+ALTER TABLE reservations 
+ADD CONSTRAINT check_booking_period_bounds 
+CHECK (
+    NOT lower_inf(booking_period) AND  -- Запрещаем бесконечную дату начала
+    NOT upper_inf(booking_period) AND  -- Запрещаем бесконечную дату конца
+    NOT isempty(booking_period)        -- Запрещаем пустые диапазоны
+);
+
